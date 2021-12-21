@@ -1,6 +1,6 @@
 use std::{fmt::format, process::exit};
 
-use futures::{stream::FuturesUnordered, FutureExt, StreamExt, TryFutureExt, TryStreamExt};
+use futures::{stream::{FuturesUnordered, BufferUnordered}, FutureExt, StreamExt, TryFutureExt, TryStreamExt};
 use git2::{Odb, OdbObject, Oid, Repository};
 use hyper::client::HttpConnector;
 use indicatif::ProgressBar;
@@ -28,23 +28,20 @@ async fn _main() -> Result<(), Error> {
     let progress = ProgressBar::new(ids.len().try_into().unwrap_or(0));
 
     let client = IpfsClient::<HttpConnector>::default();
-    let mut objects = match ids
+    let futures = ids
         .into_iter()
         .map(|oid| {
-            let obj = odb.read(oid).context(Git)?;
-            Ok(add_git_object(&client, obj))
-        })
-        .collect::<Result<FuturesUnordered<_>, Error>>()
-    {
-        Err(e) => panic!("{}", e),
-        Ok(objects) => objects,
-    };
+            Ok(add_git_object(&client, odb.read(oid).context(Git)?))
+        }).collect::<Result<Vec<_>, Error>>()?;
+
+    let mut objects = futures::stream::iter(futures).buffer_unordered(64);
 
     while let Some(res) = objects.next().await {
         match res {
             Err(e) => {
+                // println!("Error!: {}", e);
                 progress.abandon_with_message(format!("{}", e));
-                exit(1);
+                return Err(e)
             }
             Ok((cid, oid, size)) => {
                 progress.inc(1);
