@@ -621,6 +621,7 @@ dependencies = [
  "indicatif",
  "ipfs-api",
  "itertools",
+ "rand",
  "snafu",
  "tokio",
 ]
