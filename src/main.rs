@@ -1,16 +1,21 @@
-use std::{collections::HashMap, fmt::format};
+use std::{
+    collections::HashMap,
+    fmt::{format, Display},
+    pin::Pin,
+};
 
 use futures::{
+    channel::mpsc,
     stream::{BufferUnordered, FuturesUnordered},
-    FutureExt, StreamExt, TryFutureExt, TryStreamExt,
+    Future, FutureExt, SinkExt, Stream, StreamExt, TryFutureExt, TryStreamExt,
 };
-use git2::{Odb, OdbObject, Oid, Repository, References};
+use git2::{Odb, OdbObject, Oid, References, Repository};
 use hyper::client::HttpConnector;
 use indicatif::ProgressBar;
 use ipfs_api::{request::Add, response::AddResponse, IpfsApi, IpfsClient};
 use itertools::Itertools;
 
-use snafu::{ResultExt, Snafu, ensure};
+use snafu::{ensure, ResultExt, Snafu};
 
 const QUEUE_SIZE: usize = 256;
 
@@ -32,7 +37,7 @@ async fn _main() -> Result<(), Error> {
 
     match generate_info_refs(repo.references().context(Git)?) {
         Err(e) => return Err(e),
-        Ok(s) => println!("{}", s)
+        Ok(s) => println!("{}", s),
     }
 
     repo.references()
@@ -121,15 +126,10 @@ async fn add(ipfs: &impl IpfsApi, data: Vec<u8>) -> Result<(cid::Cid, usize), Er
             std::io::Cursor::new(data),
             Add::builder().cid_version(1).build(),
         )
-        .map_err(|e| Error::Ipfs {
-            text: format!("{}", e),
-        })
+        .map_err(|e| Error::ipfs(e))
         .map(|res| match res {
             Ok(res) => {
-                let size = match res.size.parse::<usize>() {
-                    Err(e) => return Err(Error::Parse { source: e }),
-                    Ok(size) => size,
-                };
+                let size = res.size.parse::<usize>().context(Parse)?;
 
                 if size != len {
                     return Err(Error::MismatchedSizes {
@@ -167,13 +167,140 @@ enum Error {
     Ref { source: RefError },
 }
 
-async fn add_git_repository_to_ipfs(repo: Repository, ipfs: &impl IpfsApi) -> Result<(), Error> {
-    let mut files = HashMap::<String, Cid>::new();
+impl Error {
+    fn ipfs(e: impl Display) -> Self {
+        Self::Ipfs {
+            text: e.to_string(),
+        }
+    }
+}
 
-    let odb = repo.odb().context(Git)?;
-    let ids = collect_git_oids(&odb)?;
+use async_stream::try_stream;
+use futures::channel::mpsc::channel;
 
+// fn git_repo_stream(repo: Repository, ipfs: &impl IpfsApi) -> impl Stream<Item = Result<(String, Cid), Error>> {
+//     try_stream! {
+//         yield ;
+//     }
+// }
 
+async fn write_ipfs_file(ipfs: &impl IpfsApi, path: String, cid: cid::Cid) -> Result<(), Error> {
+    ipfs.files_cp(path.as_str(), format!("/ipfs/{}", cid).as_str())
+        .map_err(|e| Error::ipfs(e))
+        .await
+}
+
+async fn complete_future_and_write_ipfs_file(
+    ipfs: &impl IpfsApi,
+    fut: Pin<Box<dyn Future<Output = Result<(String, cid::Cid), Error>>>>,
+) -> Result<(), Error> {
+    let (path, cid) = match fut.await {
+        Err(e) => return Err(e),
+        Ok(x) => x,
+    };
+
+    write_ipfs_file(ipfs, path, cid).await
+}
+
+async fn add_git_repository_to_ipfs(
+    repo: Repository,
+    ipfs: &impl IpfsApi,
+) -> Result<(), Error> {
+    const QUEUE_SIZE: usize = 256;
+    let (mut tx, rx) =
+        mpsc::unbounded::<Pin<Box<dyn Future<Output = Result<(String, cid::Cid), Error>>>>>();
+
+    let futures = rx
+        .map(|fut| complete_future_and_write_ipfs_file(ipfs, fut))
+        .buffer_unordered(QUEUE_SIZE);
+    {
+        let odb = repo.odb().context(Git)?;
+        for oid in collect_git_oids(&odb)? {
+            let obj = odb.read(oid).context(Git)?;
+            tx.send(Box::pin(async move {
+                let res = ipfs.add(obj.data()).map_err(|e| Error::ipfs(e)).await?;
+                let cid = res.hash.parse::<cid::Cid>().context(Cid)?;
+                let bytes = oid.to_string().into_bytes();
+                let prefix = String::from_utf8_lossy(&bytes[0..2]);
+                let suffix = String::from_utf8_lossy(&bytes[3..]);
+
+                Ok((
+                    format!("/objects/{}/{}", prefix, suffix),
+                    cid
+                ))
+            }));
+        }
+    }
+
+    tx.send(Box::pin(async move {
+        Ok((
+            "/info/refs".to_owned(),
+            add(
+                ipfs,
+                generate_info_refs(repo.references().context(Git)?)?.into_bytes(),
+            )
+            .await?
+            .0,
+        ))
+    }));
+
+    // let futures =
+
+    //     .collect::<Result<Vec<_>, Error>>()?;
+
+    // let iter: Vec<&dyn >
+
+    // let iter = vec![async {
+    //     Result::<(String, cid::Cid), Error>::Ok((
+    //         "/info/refs".to_owned(),
+    //         add(
+    //             ipfs,
+    //             generate_info_refs(repo.references().context(Git)?)?.into_bytes(),
+    //         )
+    //         .await?
+    //         .0,
+    //     ))
+    // })]
+    // .into_iter()
+    // .chain(ids.into_iter().map(|oid| async {
+    //     match odb.read(oid).context(Git) {
+    //         Err(e) => Err(e),
+    //         Ok(obj) => {
+    //             match add_git_object(ipfs, obj).await {
+    //                 Err(e) => Err(e),
+    //                 Ok((cid, oid, _)) => {
+    //                     let a = oid.to_string().chars();
+    //                     Ok((format!("objects/{}/{}", a.take(2).join(""), a.join("")).to_owned(), cid))
+    //                 }
+    //             }
+    //         }
+    //     };
+
+    // }));
+
+    // let (tx, rx) = channel::<Result<(String, cid::Cid), Error>>(QUEUE_SIZE);
+
+    // tokio::spawn(async {
+    //     tx.send(async { ) }.await);
+    // });
+
+    // rx.map(|res| {
+    //     async move {
+    //         match res {
+    //             Err(e) => Err(e),
+    //             Ok((path, cid)) => ipfs.files_cp(format!("/ipfs/{}", cid).as_str(), path.as_str()).map_err(|e| Error::ipfs(e)).await
+    //         }
+    //     }
+    // }).buffer_unordered(QUEUE_SIZE);
+
+    // Ok(("/info/refs".to_owned(), add(ipfs, generate_info_refs(repo.references().context(Git)?)?.into_bytes()).await?.0));
+
+    // let odb = repo.odb().context(Git)?;
+    // let ids = collect_git_oids(&odb)?;
+
+    // let futures = ids.into_iter().map(|oid| Ok(add_git_object(&ipfs, odb.read(oid).context(Git)?))).collect::<Result<Vec<_>, Error>>()?;
+
+    // let mut objects = futures::stream::iter(futures);
 
     Ok(())
 }
@@ -184,16 +311,13 @@ enum RefError {
     RefHadNoName {},
 
     #[snafu()]
-    RefHadNoTarget {
-        name: String,
-    },
+    RefHadNoTarget { name: String },
 }
 
 fn generate_info_refs(refs: References) -> Result<String, Error> {
-    refs
-    .map(|res| match res {
-        Err(e) => Err(Error::Git{ source: e }),
-        Ok(r) => Ok(r)
+    refs.map(|res| match res {
+        Err(e) => Err(Error::Git { source: e }),
+        Ok(r) => Ok(r),
     })
     .filter_ok(|r| !r.is_remote())
     .fold(Ok(String::new()), |x, y| -> Result<String, Error> {
@@ -202,12 +326,17 @@ fn generate_info_refs(refs: References) -> Result<String, Error> {
             (Ok(x), Ok(y)) => {
                 let name = match y.name() {
                     None => return Err(RefError::RefHadNoName {}).context(Ref),
-                    Some(name) => name
+                    Some(name) => name,
                 };
 
                 let target = match y.target() {
-                    None => return Err(RefError::RefHadNoTarget { name: name.to_string() }).context(Ref),
-                    Some(target) => target
+                    None => {
+                        return Err(RefError::RefHadNoTarget {
+                            name: name.to_string(),
+                        })
+                        .context(Ref)
+                    }
+                    Some(target) => target,
                 };
 
                 Ok(x + format!("{}\t{}\n", name, target).as_str())
