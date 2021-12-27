@@ -1,6 +1,6 @@
-use std::pin::Pin;
+use std::{pin::Pin, rc::Rc};
 
-use futures::{Future, future::BoxFuture};
+use futures::{future::BoxFuture, Future};
 use git2::{Odb, OdbObject, Oid, References, Repository};
 use ipfs_api::IpfsApi;
 use itertools::Itertools;
@@ -20,7 +20,7 @@ pub(crate) fn oids(odb: &Odb) -> Result<Vec<Oid>, Error> {
 }
 
 pub(crate) async fn save_object(
-    ipfs: &impl IpfsApi,
+    ipfs: &'_ impl IpfsApi,
     oid: String,
     data: Vec<u8>,
 ) -> Result<(String, cid::Cid), Error> {
@@ -32,13 +32,27 @@ pub(crate) async fn save_object(
 }
 
 // pub(crate) fn save_object_futures(
-//     ipfs: &impl IpfsApi,
-//     odb: Odb,
-// ) -> impl Iterator<Item = Pin<Box<dyn Future<Output = Result<(String, cid::Cid), Error>>>>> {
-//     oids(&odb).unwrap().into_iter().map(|oid| -> Pin<Box<dyn Future<Output = _>>> {
-//         let data = odb.read(oid).context(crate::error::Git).unwrap().data().to_vec();
-//         Box::pin(save_object(ipfs, oid.to_string(), data))
-//     })
+//     ipfs: &'a impl IpfsApi,
+//     repo: &'a Repository,
+// ) -> Result<
+//     impl Iterator<
+//         Item = Result<Pin<Box<dyn Future<Output = Result<(String, cid::Cid), Error>>>>, Error>,
+//     >,
+//     Error,
+// > {
+//     Ok(oids(&repo.odb().context(Git)?).unwrap().into_iter().map(
+//         move |oid| -> Result<Pin<Box<dyn Future<Output = _>>>, Error> {
+//             let data = repo
+//                 .odb()
+//                 .context(Git)?
+//                 .read(oid)
+//                 .context(crate::error::Git)
+//                 .unwrap()
+//                 .data()
+//                 .to_vec();
+//             Ok(Box::pin(save_object(&ipfs, oid.to_string(), data)))
+//         },
+//     ))
 // }
 
 pub(crate) fn generate_info_refs(refs: References) -> Result<String, Error> {

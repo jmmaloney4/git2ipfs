@@ -252,8 +252,9 @@ use ipfs_api::IpfsApi;
 use itertools::Itertools;
 use snafu::ResultExt;
 use std::{
-    iter::{self, Chain},
+    iter::{self, once, Chain},
     pin::Pin,
+    rc::Rc,
 };
 
 mod error;
@@ -289,11 +290,56 @@ async fn main() {
     let repo = Repository::open(path).context(error::Git).unwrap();
     let odb = repo.odb().context(error::Git).unwrap();
 
+    println!("{:?}", repo.head().unwrap().name().unwrap());
+
+    let mut futures = stream::iter(
+        oids(&odb)
+            .unwrap()
+            .into_iter()
+            .map(|oid| -> Pin<Box<dyn Future<Output = _>>> {
+                let data = odb
+                    .read(oid)
+                    .context(crate::error::Git)
+                    .unwrap()
+                    .data()
+                    .to_vec();
+                Box::pin(git::save_object(&ipfs, oid.to_string(), data))
+            })
+            .chain(once(Box::pin(async {
+                Result::<_, error::Error>::Ok((
+                    "/info/refs".to_owned(),
+                    ipfs::add(
+                        &ipfs,
+                        generate_info_refs(repo.references().context(error::Git).unwrap())
+                            .unwrap()
+                            .into_bytes(),
+                    )
+                    .await
+                    .unwrap(),
+                ))
+            }) as Pin<Box<dyn Future<Output = _>>>)),
+    )
+    .buffer_unordered(QUEUE_SIZE);
+
+    if let Err(e) = async {
+        while let Some(x) = futures.next().await {
+            match x {
+                Err(e) => return Err(e),
+                _ => continue,
+            }
+        }
+        Ok(())
+    }
+    .await
+    {
+        panic!("{}", e);
+    }
+
     // let s2 = stream::iter(iter::once(Box::pin(async {
     //     Result::<_, error::Error>::Ok((
     //         "/info/refs",
     //         ipfs::add(
-    //             ipfs,
+    //             ipfs.as_ref(),
     //             generate_info_refs(repo.references().context(error::Git).unwrap())
     //                 .unwrap()
     //                 .into_bytes(),
