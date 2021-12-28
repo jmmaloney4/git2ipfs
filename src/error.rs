@@ -35,6 +35,9 @@ pub(crate) enum Error {
 
     #[snafu(display("Failed to convert bytes to utf8: {}", source))]
     FromUtf8 { source: std::string::FromUtf8Error },
+
+    #[snafu(display("Io Error {}", source))]
+    Io { source: std::io::Error },
 }
 
 impl Error {
