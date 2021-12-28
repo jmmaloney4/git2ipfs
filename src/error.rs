@@ -34,7 +34,7 @@ pub(crate) enum Error {
     NoReferenceKind {},
 
     #[snafu(display("Failed to convert bytes to utf8: {}", source))]
-    FromUtf8Error { source: std::string::FromUtf8Error },
+    FromUtf8 { source: std::string::FromUtf8Error },
 }
 
 impl Error {

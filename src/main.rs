@@ -1,13 +1,9 @@
-use error::Error;
-use futures::{future::BoxFuture, stream, Future, Stream, StreamExt, TryFutureExt, TryStreamExt};
+use futures::{stream, StreamExt};
 use git::{all_oids, generate_info_refs, generate_ref};
-use git2::{Odb, OdbObject, Oid, References, Repository};
+use git2::Repository;
 use itertools::Itertools;
-use snafu::{OptionExt, ResultExt};
-use std::{
-    iter::{once, once_with},
-    pin::Pin,
-};
+use snafu::ResultExt;
+use std::iter::once_with;
 
 mod error;
 mod git;
@@ -31,7 +27,7 @@ async fn main() {
     let objects = all_oids(&odb).unwrap().into_iter().map(|oid| {
         let data = odb.read(oid).context(crate::error::Git)?.data().to_vec();
         let hash = oid.to_string();
-        let path = format!("/objects/{}/{}", &hash[..2], &hash[2..]).to_owned();
+        let path = format!("/objects/{}/{}", &hash[..2], &hash[2..]);
         Ok((path, data))
     });
 
@@ -51,12 +47,16 @@ async fn main() {
     .map_ok(|(path, data)| (path, data.into_bytes()));
 
     let prefix = git::gen_temp_dir_path();
-    let mut futures = stream::iter(objects.chain(info_refs).chain(head)).map(|res| async {
-        match res {
-            Err(e) => Err(e),
-            Ok((path, data)) => ipfs::write_file(&ipfs, format!("/{}/{}", prefix, path), data).await,
-        }
-    }).buffer_unordered(QUEUE_SIZE);    
+    let mut futures = stream::iter(objects.chain(info_refs).chain(head))
+        .map(|res| async {
+            match res {
+                Err(e) => Err(e),
+                Ok((path, data)) => {
+                    ipfs::write_file(&ipfs, format!("/{}/{}", prefix, path), data).await
+                }
+            }
+        })
+        .buffer_unordered(QUEUE_SIZE);
 
     if let Err(e) = async {
         while let Some(x) = futures.next().await {
@@ -72,9 +72,9 @@ async fn main() {
         panic!("{}", e);
     }
 
-    match async {
-        ipfs_api::IpfsApi::files_stat(&ipfs, format!("/{}", prefix).as_str()).await
-    }.await {
+    match async { ipfs_api::IpfsApi::files_stat(&ipfs, format!("/{}", prefix).as_str()).await }
+        .await
+    {
         Err(e) => panic!("{}", e),
         Ok(res) => {
             println!("{}", res.hash);

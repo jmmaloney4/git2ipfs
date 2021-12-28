@@ -1,34 +1,18 @@
-use std::{pin::Pin, rc::Rc};
-
-use futures::{future::BoxFuture, Future};
-use git2::{Odb, OdbObject, Oid, Reference, References, Repository};
-use ipfs_api::IpfsApi;
+use git2::{Odb, Oid, Reference, References};
 use itertools::Itertools;
 
 use crate::error::*;
-use snafu::{ResultExt, OptionExt};
+use snafu::{OptionExt, ResultExt};
 
 /// Return the object ids for all objects in the object database.
 pub(crate) fn all_oids(odb: &Odb) -> Result<Vec<Oid>, Error> {
     let mut ids = Vec::<Oid>::new();
     odb.foreach(|oid| {
-        ids.push(oid.clone());
+        ids.push(*oid);
         true
     })
     .context(Git)?;
-    return Ok(ids);
-}
-
-pub(crate) async fn save_object(
-    ipfs: &'_ impl IpfsApi,
-    oid: String,
-    data: Vec<u8>,
-) -> Result<(String, cid::Cid), Error> {
-    let cid = crate::ipfs::add(ipfs, data).await?;
-    Ok((
-        format!("/objects/{}/{}", &oid[..2], &oid[2..]).to_owned(),
-        cid,
-    ))
+    Ok(ids)
 }
 
 pub(crate) fn generate_info_refs(refs: References) -> Result<String, Error> {
@@ -64,15 +48,13 @@ pub(crate) fn generate_info_refs(refs: References) -> Result<String, Error> {
 
 pub(crate) fn generate_ref(reference: Reference) -> Result<String, Error> {
     match reference.kind().context(crate::error::NoReferenceKind)? {
-        Direct => match reference.target() {
+        git2::ReferenceType::Direct => match reference.target() {
             None => unreachable!(),
             Some(oid) => Ok(format!("{}\n", oid)),
         },
-        Symbolic => match reference.symbolic_target_bytes() {
+        git2::ReferenceType::Symbolic => match reference.symbolic_target_bytes() {
             None => unreachable!(),
-            Some(target) => {
-                Ok(String::from_utf8(target.to_owned()).context(crate::error::FromUtf8Error)?)
-            }
+            Some(target) => Ok(String::from_utf8(target.to_owned()).context(FromUtf8)?),
         },
     }
 }
