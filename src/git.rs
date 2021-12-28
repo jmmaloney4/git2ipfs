@@ -1,15 +1,15 @@
 use std::{pin::Pin, rc::Rc};
 
 use futures::{future::BoxFuture, Future};
-use git2::{Odb, OdbObject, Oid, References, Repository};
+use git2::{Odb, OdbObject, Oid, Reference, References, Repository};
 use ipfs_api::IpfsApi;
 use itertools::Itertools;
 
 use crate::error::*;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 /// Return the object ids for all objects in the object database.
-pub(crate) fn oids(odb: &Odb) -> Result<Vec<Oid>, Error> {
+pub(crate) fn all_oids(odb: &Odb) -> Result<Vec<Oid>, Error> {
     let mut ids = Vec::<Oid>::new();
     odb.foreach(|oid| {
         ids.push(oid.clone());
@@ -26,34 +26,10 @@ pub(crate) async fn save_object(
 ) -> Result<(String, cid::Cid), Error> {
     let cid = crate::ipfs::add(ipfs, data).await?;
     Ok((
-        format!("objects/{}/{}", &oid[..2], &oid[2..]).to_owned(),
+        format!("/objects/{}/{}", &oid[..2], &oid[2..]).to_owned(),
         cid,
     ))
 }
-
-// pub(crate) fn save_object_futures(
-//     ipfs: &'a impl IpfsApi,
-//     repo: &'a Repository,
-// ) -> Result<
-//     impl Iterator<
-//         Item = Result<Pin<Box<dyn Future<Output = Result<(String, cid::Cid), Error>>>>, Error>,
-//     >,
-//     Error,
-// > {
-//     Ok(oids(&repo.odb().context(Git)?).unwrap().into_iter().map(
-//         move |oid| -> Result<Pin<Box<dyn Future<Output = _>>>, Error> {
-//             let data = repo
-//                 .odb()
-//                 .context(Git)?
-//                 .read(oid)
-//                 .context(crate::error::Git)
-//                 .unwrap()
-//                 .data()
-//                 .to_vec();
-//             Ok(Box::pin(save_object(&ipfs, oid.to_string(), data)))
-//         },
-//     ))
-// }
 
 pub(crate) fn generate_info_refs(refs: References) -> Result<String, Error> {
     refs.map(|res| match res {
@@ -86,12 +62,24 @@ pub(crate) fn generate_info_refs(refs: References) -> Result<String, Error> {
     })
 }
 
-pub(crate) async fn save_info_refs<'a>(
-    ipfs: &impl IpfsApi,
-    refs: References<'a>,
-) -> Result<(String, cid::Cid), Error> {
-    Result::<_, Error>::Ok((
-        "/info/refs".to_owned(),
-        crate::ipfs::add(ipfs, generate_info_refs(refs)?.into_bytes()).await?,
-    ))
+pub(crate) fn generate_ref(reference: Reference) -> Result<String, Error> {
+    match reference.kind().context(crate::error::NoReferenceKind)? {
+        Direct => match reference.target() {
+            None => unreachable!(),
+            Some(oid) => Ok(format!("{}\n", oid)),
+        },
+        Symbolic => match reference.symbolic_target_bytes() {
+            None => unreachable!(),
+            Some(target) => {
+                Ok(String::from_utf8(target.to_owned()).context(crate::error::FromUtf8Error)?)
+            }
+        },
+    }
+}
+
+use rand::distributions::{Alphanumeric, DistString};
+use rand::thread_rng;
+pub(crate) fn gen_temp_dir_path() -> String {
+    const TMP_PATH_LEN: usize = 19;
+    Alphanumeric.sample_string(&mut thread_rng(), TMP_PATH_LEN)
 }

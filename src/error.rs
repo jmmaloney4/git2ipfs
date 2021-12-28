@@ -29,6 +29,12 @@ pub(crate) enum Error {
 
     #[snafu(display("Ref Error: {}", source))]
     Ref { source: RefError },
+
+    #[snafu(display("Couldn't determine reference kind"))]
+    NoReferenceKind {},
+
+    #[snafu(display("Failed to convert bytes to utf8: {}", source))]
+    FromUtf8Error { source: std::string::FromUtf8Error },
 }
 
 impl Error {
