@@ -6,7 +6,7 @@ use ipfs_api::IpfsApi;
 use itertools::Itertools;
 
 use crate::error::*;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ResultExt, OptionExt};
 
 /// Return the object ids for all objects in the object database.
 pub(crate) fn all_oids(odb: &Odb) -> Result<Vec<Oid>, Error> {
@@ -56,7 +56,7 @@ pub(crate) fn generate_info_refs(refs: References) -> Result<String, Error> {
                     Some(target) => target,
                 };
 
-                Ok(x + format!("{}\t{}\n", name, target).as_str())
+                Ok(x + format!("{}\t{}\n", target, name).as_str())
             }
         }
     })

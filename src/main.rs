@@ -71,4 +71,13 @@ async fn main() {
     {
         panic!("{}", e);
     }
+
+    match async {
+        ipfs_api::IpfsApi::files_stat(&ipfs, format!("/{}", prefix).as_str()).await
+    }.await {
+        Err(e) => panic!("{}", e),
+        Ok(res) => {
+            println!("{}", res.hash);
+        }
+    }
 }
