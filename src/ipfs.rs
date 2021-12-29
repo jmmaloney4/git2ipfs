@@ -1,4 +1,3 @@
-use flate2::read::ZlibEncoder;
 use futures::TryFutureExt;
 use ipfs_api::{request::FilesWrite, IpfsApi};
 

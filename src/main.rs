@@ -2,12 +2,15 @@ use clap::{crate_authors, crate_description, crate_name, crate_version, App, Arg
 use flate2::read::ZlibEncoder;
 use futures::{stream, StreamExt, TryFutureExt};
 use git::{all_oids, generate_info_refs, generate_ref};
-use git2::{ObjectType, Repository};
+use git2::Repository;
 use indicatif::ProgressBar;
 use ipfs_api::IpfsApi;
-use itertools::Itertools;
 use snafu::ResultExt;
-use std::{io::Read, iter::once_with, path::PathBuf, process::exit};
+use std::{
+    io::{Cursor, Read},
+    iter::once_with,
+    path::PathBuf,
+};
 
 mod error;
 mod git;
@@ -41,31 +44,13 @@ async fn main() {
     let oids = all_oids(&odb).unwrap();
     let n = oids.len() + 2;
 
-    // let obj = oids
-    //     .iter()
-    //     .filter(|oid| odb.read_header(**oid).unwrap().1 == ObjectType::Commit)
-    //     .next()
-    //     .unwrap();
-
-    // println!(
-    //     "{}\n{}",
-    //     obj,
-    //     String::from_utf8(odb.read(*obj).unwrap().data().to_vec()).unwrap()
-    // );
-
-    // exit(0);
-
     let objects = oids.into_iter().map(|oid| {
         let object = odb.read(oid).context(crate::error::Git)?;
         let data = object.data().to_vec();
-        let len = data.len();
-        let mut compressed = Vec::<u8>::new();
-        let encoded = git_object_format::encode(
-            std::io::Cursor::new(data),
-            crate::git::into_object_type(object.kind()),
-        )
-        .context(error::Io)?;
+        let encoded =
+            Cursor::new(git::prefix_for_object_type(object.kind())?).chain(Cursor::new(data));
 
+        let mut compressed = Vec::<u8>::new();
         ZlibEncoder::new(encoded, flate2::Compression::best())
             .read_to_end(&mut compressed)
             .context(error::Io)?;

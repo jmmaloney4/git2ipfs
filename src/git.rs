@@ -66,12 +66,12 @@ pub(crate) fn gen_temp_dir_path() -> String {
     Alphanumeric.sample_string(&mut thread_rng(), TMP_PATH_LEN)
 }
 
-pub(crate) fn into_object_type(ty: git2::ObjectType) -> git_object_format::Type {
+pub(crate) fn prefix_for_object_type(ty: git2::ObjectType) -> Result<Vec<u8>, Error> {
     match ty {
         git2::ObjectType::Any => unimplemented!(),
-        git2::ObjectType::Commit => git_object_format::Type::Commit,
-        git2::ObjectType::Tree => git_object_format::Type::Tree,
-        git2::ObjectType::Blob => git_object_format::Type::Blob,
-        git2::ObjectType::Tag => git_object_format::Type::Tag,
+        git2::ObjectType::Commit => Ok(String::from("commit ").into_bytes()),
+        git2::ObjectType::Tree => Ok(String::from("tree ").into_bytes()),
+        git2::ObjectType::Blob => Ok(String::from("blob ").into_bytes()),
+        git2::ObjectType::Tag => Ok(String::from("tag ").into_bytes()),
     }
 }
