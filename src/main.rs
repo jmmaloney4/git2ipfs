@@ -2,12 +2,12 @@ use clap::{crate_authors, crate_description, crate_name, crate_version, App, Arg
 use flate2::read::ZlibEncoder;
 use futures::{stream, StreamExt, TryFutureExt};
 use git::{all_oids, generate_info_refs, generate_ref};
-use git2::Repository;
+use git2::{ObjectType, Repository};
 use indicatif::ProgressBar;
 use ipfs_api::IpfsApi;
 use itertools::Itertools;
 use snafu::ResultExt;
-use std::{io::Read, iter::once_with, path::PathBuf};
+use std::{io::Read, iter::once_with, path::PathBuf, process::exit};
 
 mod error;
 mod git;
@@ -41,11 +41,32 @@ async fn main() {
     let oids = all_oids(&odb).unwrap();
     let n = oids.len() + 2;
 
-    let objects = oids.into_iter().map(|oid| {
-        let data = odb.read(oid).context(crate::error::Git)?.data().to_vec();
-        let mut compressed = Vec::<u8>::new();
+    // let obj = oids
+    //     .iter()
+    //     .filter(|oid| odb.read_header(**oid).unwrap().1 == ObjectType::Commit)
+    //     .next()
+    //     .unwrap();
 
-        ZlibEncoder::new(std::io::Cursor::new(data), flate2::Compression::fast())
+    // println!(
+    //     "{}\n{}",
+    //     obj,
+    //     String::from_utf8(odb.read(*obj).unwrap().data().to_vec()).unwrap()
+    // );
+
+    // exit(0);
+
+    let objects = oids.into_iter().map(|oid| {
+        let object = odb.read(oid).context(crate::error::Git)?;
+        let data = object.data().to_vec();
+        let len = data.len();
+        let mut compressed = Vec::<u8>::new();
+        let encoded = git_object_format::encode(
+            std::io::Cursor::new(data),
+            crate::git::into_object_type(object.kind()),
+        )
+        .context(error::Io)?;
+
+        ZlibEncoder::new(encoded, flate2::Compression::best())
             .read_to_end(&mut compressed)
             .context(error::Io)?;
 
@@ -64,10 +85,9 @@ async fn main() {
     let head = once_with(|| {
         Result::<_, error::Error>::Ok((
             "/HEAD".to_owned(),
-            generate_ref(repo.head().context(error::Git)?)?,
+            generate_ref(repo.head().context(error::Git)?)?.into_bytes(),
         ))
-    })
-    .map_ok(|(path, data)| (path, data.into_bytes()));
+    });
 
     let prefix = git::gen_temp_dir_path();
     let pb = ProgressBar::new(n.try_into().unwrap());

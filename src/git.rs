@@ -65,3 +65,13 @@ pub(crate) fn gen_temp_dir_path() -> String {
     const TMP_PATH_LEN: usize = 19;
     Alphanumeric.sample_string(&mut thread_rng(), TMP_PATH_LEN)
 }
+
+pub(crate) fn into_object_type(ty: git2::ObjectType) -> git_object_format::Type {
+    match ty {
+        git2::ObjectType::Any => unimplemented!(),
+        git2::ObjectType::Commit => git_object_format::Type::Commit,
+        git2::ObjectType::Tree => git_object_format::Type::Tree,
+        git2::ObjectType::Blob => git_object_format::Type::Blob,
+        git2::ObjectType::Tag => git_object_format::Type::Tag,
+    }
+}
