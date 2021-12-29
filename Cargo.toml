@@ -17,4 +17,5 @@ ipfs-api = { version = "0.14", features = ["with-hyper-rustls", "with-builder"],
 itertools = "0.10"
 snafu = "0.6"
 rand = "0.8"
+tempfile = "3.2.0"
 tokio =  { version = "1", features = ["full"] }

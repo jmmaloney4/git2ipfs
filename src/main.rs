@@ -38,6 +38,10 @@ async fn main() {
         Some(path) => PathBuf::from(path),
     };
 
+    let pb = ProgressBar::new_spinner();
+    let message = format!("Loading git repository at {:#?}...", path);
+    pb.set_message(message.clone());
+
     let ipfs = ipfs_api::IpfsClient::<hyper::client::HttpConnector>::default();
     let repo = Repository::open(path).context(error::Git).unwrap();
     let odb = repo.odb().context(error::Git).unwrap();
@@ -47,8 +51,9 @@ async fn main() {
     let objects = oids.into_iter().map(|oid| {
         let object = odb.read(oid).context(crate::error::Git)?;
         let data = object.data().to_vec();
-        let encoded =
-            Cursor::new(git::prefix_for_object_type(object.kind())?).chain(Cursor::new(data));
+        let encoded = Cursor::new(git::prefix_for_object_type(object.kind())?)
+            .chain(Cursor::new(format!("{}\0", data.len())))
+            .chain(Cursor::new(data));
 
         let mut compressed = Vec::<u8>::new();
         ZlibEncoder::new(encoded, flate2::Compression::best())
@@ -73,6 +78,8 @@ async fn main() {
             generate_ref(repo.head().context(error::Git)?)?.into_bytes(),
         ))
     });
+
+    pb.finish_with_message(format!("{} Done.", message));
 
     let prefix = git::gen_temp_dir_path();
     let pb = ProgressBar::new(n.try_into().unwrap());
