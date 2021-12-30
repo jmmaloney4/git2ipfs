@@ -3,7 +3,7 @@ use flate2::read::ZlibEncoder;
 use futures::{stream, StreamExt, TryFutureExt};
 use git::{all_oids, generate_info_refs, generate_ref};
 use git2::Repository;
-use indicatif::ProgressBar;
+use indicatif::{ProgressBar, ProgressStyle};
 use ipfs_api::IpfsApi;
 use snafu::ResultExt;
 use std::{
@@ -49,6 +49,7 @@ async fn main() {
     let n = oids.len() + 2;
 
     let objects = oids.into_iter().map(|oid| {
+        pb.println(format!("{}", oid));
         let object = odb.read(oid).context(crate::error::Git)?;
         let data = object.data().to_vec();
         let encoded = Cursor::new(git::prefix_for_object_type(object.kind())?)
@@ -62,6 +63,7 @@ async fn main() {
 
         let hash = oid.to_string();
         let path = format!("/objects/{}/{}", &hash[..2], &hash[2..]);
+        pb.println(format!("{} done.", oid));
         Ok((path, compressed))
     });
 
@@ -79,24 +81,33 @@ async fn main() {
         ))
     });
 
-    pb.finish_with_message(format!("{} Done.", message));
-
     let prefix = git::gen_temp_dir_path();
-    let pb = ProgressBar::new(n.try_into().unwrap());
     let mut futures = stream::iter(objects.chain(info_refs).chain(head))
         .map(|res| async {
             match res {
                 Err(e) => Err(e),
                 Ok((path, data)) => {
-                    ipfs::write_file(&ipfs, format!("/{}/{}", prefix, path), data)
+                    let path = format!("/{}/{}", prefix, path);
+                    pb.println(format!("Waiting for {}", path));
+                    let rv = ipfs::write_file(&ipfs, path.clone(), data)
                         .map_ok(|_| {
                             pb.inc(1);
                         })
-                        .await
+                        .await;
+                    pb.println(format!("Waiting for {} done.", path));
+                    rv
                 }
             }
         })
         .buffer_unordered(QUEUE_SIZE);
+
+    pb.finish_with_message(format!("{} Done.", message));
+    let pb = ProgressBar::new(n.try_into().unwrap());
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{pos:>7}/{len:7} {bar:40.cyan/blue} {elapsed} {msg}")
+            .progress_chars("##-"),
+    );
 
     while let Some(x) = futures.next().await {
         match x {
@@ -105,7 +116,8 @@ async fn main() {
         }
     }
 
-    pb.finish_with_message(format!("Finished in {:?}", pb.elapsed()));
+    // pb.finish_with_message(format!("Finished in {:?}", pb.elapsed()));
+    pb.finish();
 
     match ipfs.files_stat(format!("/{}", prefix).as_str()).await {
         Err(e) => panic!("{}", e),
