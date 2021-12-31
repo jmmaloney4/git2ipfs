@@ -539,6 +539,7 @@ dependencies = [
  "snafu",
  "tempfile",
  "tokio",
+ "url",
 ]
 
 [[package]]
