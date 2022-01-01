@@ -1,6 +1,6 @@
 use clap::{crate_authors, crate_description, crate_name, crate_version, App, Arg};
 use flate2::read::ZlibEncoder;
-use futures::{stream, StreamExt, TryFutureExt};
+use futures::{stream, FutureExt, StreamExt, TryFutureExt, TryStreamExt};
 use git::{all_oids, generate_info_refs, generate_ref};
 use git2::{Odb, Oid, References, Repository};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -11,7 +11,9 @@ use std::{
     iter::once_with,
     path::PathBuf,
     process::exit,
+    sync::Arc,
 };
+use tempfile::TempDir;
 use url::Url;
 
 mod error;
@@ -35,26 +37,42 @@ async fn main() {
         )
         .get_matches();
 
-    let paths: Box<dyn Iterator<Item = PathBuf>> = match matches.values_of("arg") {
-        None => Box::new(std::iter::once(
-            std::env::current_dir().unwrap_or_else(|_| panic!("Couldn't get current directory.")),
-        )),
-        Some(args) => Box::new(args.map(|arg| {
-            if let Ok(url) = Url::parse(arg) {
-                todo!()
-            } else {
-                PathBuf::from(arg)
-            }
-        })),
-    };
+    let paths: Box<dyn Iterator<Item = Result<git2::Repository, error::Error>>> =
+        match matches.values_of("arg") {
+            None => Box::new(std::iter::once_with(|| {
+                Ok(
+                    Repository::open(std::env::current_dir().context(error::Io)?)
+                        .context(error::Git)?,
+                )
+            })),
+            Some(args) => Box::new(args.map(|arg| {
+                if let Ok(url) = Url::parse(arg) {
+                    let tmpdir = TempDir::new().context(error::Io)?;
+                    Repository::clone(url.as_str(), tmpdir.into_path()).context(error::Git)
+                } else {
+                    Repository::open(arg).context(error::Git)
+                }
+            })),
+        };
 
     let ipfs = ipfs_api::IpfsClient::<hyper::client::HttpConnector>::default();
-    let mp = MultiProgress::new();
+    // let mp = MultiProgress::new();
 
-    let mut stream = stream::iter(paths).then(|path| {
-        let pb = ProgressBar::new(0);
-        mp.add(pb.clone());
-        Box::pin(git2ipfs(path, &ipfs, pb))
+    let mp = Arc::new(MultiProgress::new());
+
+    let mut stream = stream::iter(paths).then(|repo| {
+        let pb = ProgressBar::new(1);
+        Arc::clone(&mp).add(pb.clone());
+        Box::pin(async {
+            match repo {
+                Ok(repo) => {
+                    let path = format!("{:?}", repo.path());
+                    let rv = git2ipfs(repo, &ipfs, pb).await;
+                    Ok((path, rv?))
+                }
+                Err(e) => Err(e),
+            }
+        })
     });
 
     while let Some(res) = stream.next().await {
@@ -66,18 +84,16 @@ async fn main() {
 }
 
 async fn git2ipfs(
-    path: PathBuf,
+    repo: git2::Repository,
     ipfs: &impl IpfsApi,
     pb: ProgressBar,
-) -> Result<(PathBuf, String), error::Error> {
-    let repo = Repository::open(&path).context(error::Git).unwrap();
-    let odb = repo.odb().context(error::Git).unwrap();
-    let oids = all_oids(&odb).unwrap();
+) -> Result<String, error::Error> {
+    let odb = repo.odb().context(error::Git)?;
+    let oids = all_oids(&odb)?;
 
-    let iter = object_iter(oids.into_iter(), &odb)
-        .chain(info_refs(repo.references().context(error::Git)?))
-        .chain(head(repo.head().context(error::Git)?));
-    println!("{}", iter.size_hint().0);
+    let iter = files::objects(oids.into_iter(), &odb)
+        .chain(files::info_refs(repo.references().context(error::Git)?))
+        .chain(files::head(repo.head().context(error::Git)?));
     pb.set_length(iter.size_hint().0.try_into().unwrap_or_else(|_| todo!()));
 
     let prefix = git::gen_temp_dir_path();
@@ -87,7 +103,9 @@ async fn git2ipfs(
                 Err(e) => Err(e),
                 Ok((path, data)) => {
                     let path = format!("/{}/{}", prefix, path);
+                    pb.println(format!("Started writing {}", &path));
                     let rv = ipfs::write_file(ipfs, path.clone(), data).await;
+                    pb.println(format!("Done writing {}", &path));
                     rv
                 }
             }
@@ -97,7 +115,9 @@ async fn git2ipfs(
     while let Some(x) = futures.next().await {
         match x {
             Err(e) => return Err(e),
-            Ok(_) => pb.inc(1),
+            Ok(_) => {
+                pb.inc(1);
+            }
         }
     }
 
@@ -108,49 +128,57 @@ async fn git2ipfs(
 
     pb.finish();
 
-    Ok((path, rv))
+    Ok(rv)
 }
 
-fn object_iter<'a>(
-    oids: impl Iterator<Item = Oid> + 'a,
-    odb: &'a Odb,
-) -> Box<dyn Iterator<Item = Result<(String, Vec<u8>), error::Error>> + 'a> {
-    Box::new(oids.map(move |oid| {
-        let object = odb.read(oid).context(crate::error::Git)?;
-        let data = object.data().to_vec();
+mod files {
+    use std::io::{Cursor, Read};
+    use snafu::ResultExt;
 
-        // Add appropriate header to git object
-        let encoded = Cursor::new(git::prefix_for_object_type(object.kind())?)
-            .chain(Cursor::new(format!("{}\0", data.len())))
-            .chain(Cursor::new(data));
+    use crate::error::*;
+    use crate::git;
 
-        // Compress object with zlib
-        let mut compressed = Vec::<u8>::new();
-        ZlibEncoder::new(encoded, flate2::Compression::best())
-            .read_to_end(&mut compressed)
-            .context(error::Io)?;
+    pub(crate) fn objects<'a>(
+        oids: impl Iterator<Item = git2::Oid> + 'a,
+        odb: &'a git2::Odb,
+    ) -> Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a> {
+        Box::new(oids.map(move |oid| {
+            let object = odb.read(oid).context(Git)?;
+            let data = object.data().to_vec();
 
-        let hash = oid.to_string();
-        let path = format!("/objects/{}/{}", &hash[..2], &hash[2..]);
-        Result::<(String, Vec<u8>), error::Error>::Ok((path, compressed))
-    }))
-}
+            // Add appropriate header to git object
+            let encoded = Cursor::new(git::prefix_for_object_type(object.kind())?)
+                .chain(Cursor::new(format!("{}\0", data.len())))
+                .chain(Cursor::new(data));
 
-fn info_refs<'a>(
-    refs: git2::References<'a>,
-) -> Box<dyn Iterator<Item = Result<(String, Vec<u8>), error::Error>> + 'a> {
-    Box::new(once_with(|| {
-        Result::<_, error::Error>::Ok((
-            "/info/refs".to_owned(),
-            generate_info_refs(refs)?.into_bytes(),
-        ))
-    }))
-}
+            // Compress object with zlib
+            let mut compressed = Vec::<u8>::new();
+            flate2::read::ZlibEncoder::new(encoded, flate2::Compression::best())
+                .read_to_end(&mut compressed)
+                .context(Io)?;
 
-fn head<'a>(
-    r: git2::Reference<'a>,
-) -> Box<dyn Iterator<Item = Result<(String, Vec<u8>), error::Error>> + 'a> {
-    Box::new(once_with(|| {
-        Result::<_, error::Error>::Ok(("/HEAD".to_owned(), generate_ref(r)?.into_bytes()))
-    }))
+            let hash = oid.to_string();
+            let path = format!("/objects/{}/{}", &hash[..2], &hash[2..]);
+            Result::<(String, Vec<u8>), Error>::Ok((path, compressed))
+        }))
+    }
+
+    pub(crate) fn info_refs<'a>(
+        refs: git2::References<'a>,
+    ) -> Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a> {
+        Box::new(std::iter::once_with(|| {
+            Result::<_, Error>::Ok((
+                "/info/refs".to_owned(),
+                git::generate_info_refs(refs)?.into_bytes(),
+            ))
+        }))
+    }
+
+    pub(crate) fn head<'a>(
+        r: git2::Reference<'a>,
+    ) -> Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a> {
+        Box::new(std::iter::once_with(|| {
+            Result::<_, Error>::Ok(("/HEAD".to_owned(), git::generate_ref(r)?.into_bytes()))
+        }))
+    }
 }
