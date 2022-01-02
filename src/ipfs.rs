@@ -15,10 +15,12 @@ pub(crate) async fn write_file(
         cid_version: Some(1),
         ..Default::default()
     };
-    ipfs.files_write_with_options(
-        opts.clone(),
-        std::io::Cursor::new(data),
-    )
-    .map_err(|e| Error::ipfs(format!("{} {:?}", e, opts)))
+
+    tryhard::retry_fn(|| async {
+        ipfs.files_write_with_options(opts.clone(), std::io::Cursor::new(data.clone()))
+            .map_err(|e| Error::ipfs(format!("{} {:?}", e, opts)))
+            .await
+    })
+    .retries(10)
     .await
 }

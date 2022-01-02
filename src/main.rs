@@ -1,12 +1,11 @@
 use clap::{crate_authors, crate_description, crate_name, crate_version, App, Arg};
 
-use futures::{stream, FutureExt, StreamExt, TryFutureExt};
-use git::all_oids;
+use futures::{stream, FutureExt, StreamExt, TryFutureExt, TryStreamExt};
 use git2::Repository;
 use indicatif::{MultiProgress, ProgressBar};
 use ipfs_api::IpfsApi;
-use snafu::{ResultExt};
-use std::{io::Read, process::exit, sync::Arc};
+use snafu::ResultExt;
+use std::{collections::HashSet, io::Read, process::exit, sync::Arc};
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use url::Url;
@@ -60,8 +59,8 @@ async fn main() {
     let pb = mp.add(
         ProgressBar::new(paths.size_hint().0.try_into().unwrap_or_else(|_| todo!())).with_style(
             indicatif::ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bar:cyan/blue} {pos:>7}/{len:7} {msg}")
-                .progress_chars("##-"),
+                .template("{pos}/{len} [{bar}] {eta}")
+                .progress_chars("==-"),
         ),
     );
     pb.tick();
@@ -117,7 +116,7 @@ async fn main() {
         if let Some(backtrace) = snafu::ErrorCompat::backtrace(&e) {
             eprintln!("{}", backtrace);
         }
-        exit(exitcode::DATAERR);
+        exit(exitcode::IOERR);
     }
     exit(exitcode::OK);
 }
@@ -127,17 +126,16 @@ async fn git2ipfs(
     ipfs: &impl IpfsApi,
     mp: Arc<MultiProgress>,
 ) -> Result<String, error::Error> {
-    let odb = repo.odb().context(error::Git)?;
+    // let odb = repo.odb().context(error::Git)?;
 
-    let iter = files::objects(all_oids(&odb)?.into_iter(), &odb)
-        .chain(files::info_refs(repo.references().context(error::Git)?))
-        .chain(files::head(repo.head().context(error::Git)?));
+    let files = files::from_repo(&repo);
+
     let pb = mp.add(
-        ProgressBar::new(iter.size_hint().0.try_into().unwrap_or_else(|_| todo!()))
+        ProgressBar::new(files.size_hint().0.try_into().unwrap_or_else(|_| todo!()))
             .with_style(
                 indicatif::ProgressStyle::default_bar()
-                    .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
-                    .progress_chars("##-"),
+                    .template("{pos}/{len} [{bar}] {eta}")
+                    .progress_chars("==-"),
             )
             .with_prefix(format!("{:?}", repo.path())),
     );
@@ -153,12 +151,11 @@ async fn git2ipfs(
     });
 
     let prefix = git::gen_temp_dir_path();
-    let mut futures = stream::iter(iter)
+    let mut futures = stream::iter(files)
         .map(|res| async {
             match res {
                 Err(e) => Err(e),
                 Ok((path, data)) => {
-                    pb.println(format!("{}", path));
                     let path = format!("/{}/{}", prefix, path);
                     ipfs::write_file(ipfs, path.clone(), data).await
                 }
@@ -200,18 +197,46 @@ mod files {
     type FileInfo = (String, Vec<u8>);
     type FileInfoResult = Result<FileInfo, Error>;
 
+    /// Return the object ids for all objects in the object database.
+    pub(crate) fn all_oids(odb: &git2::Odb) -> Result<Vec<git2::Oid>, Error> {
+        let mut ids = Vec::new();
+        odb.foreach(|oid| {
+            ids.push(*oid);
+            true
+        })
+        .context(Git)?;
+        Ok(ids)
+    }
+
+    pub(crate) fn from_repo<'a>(
+        repo: &'a git2::Repository,
+    ) -> Box<dyn Iterator<Item = FileInfoResult> + 'a> {
+        let inner = || {
+            let odb: git2::Odb<'a> = repo.odb().context(Git)?;
+
+            Ok(objects(all_oids(&odb)?.into_iter(), odb)
+                .chain(info_refs(repo.references().context(Git)?))
+                .chain(head(repo.head().context(Git)?)))
+        };
+
+        match inner() {
+            Ok(rv) => Box::new(rv),
+            Err(e) => Box::new(std::iter::once(Err(e))),
+        }
+    }
+
     pub(crate) fn objects<'a>(
         oids: impl Iterator<Item = git2::Oid> + 'a,
-        odb: &'a git2::Odb,
+        odb: git2::Odb<'a>,
     ) -> Box<dyn Iterator<Item = FileInfoResult> + 'a> {
         Box::new(oids.map(move |oid| {
             let object = odb.read(oid).context(Git)?;
-            let data = object.data().to_vec();
+            let prefix = format!("{}\0", object.len());
 
             // Add appropriate header to git object
-            let encoded = Cursor::new(git::prefix_for_object_type(object.kind())?)
-                .chain(Cursor::new(format!("{}\0", data.len())))
-                .chain(Cursor::new(data));
+            let encoded = git::prefix_for_object_type(object.kind())?
+                .chain(prefix.as_bytes())
+                .chain(object.data());
 
             // Compress object with zlib
             let mut compressed = Vec::<u8>::new();
