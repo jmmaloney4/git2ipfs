@@ -38,11 +38,20 @@ pub(crate) enum Error {
 
     #[snafu(display("Io Error {}", source))]
     Io { source: std::io::Error },
+
+    #[snafu(display("Custom Error {}", text))]
+    Custom { text: String },
 }
 
 impl Error {
     pub(crate) fn ipfs(e: impl std::fmt::Display) -> Self {
         Self::Ipfs {
+            text: e.to_string(),
+        }
+    }
+
+    pub(crate) fn custom(e: impl std::fmt::Display) -> Self {
+        Self::Custom {
             text: e.to_string(),
         }
     }

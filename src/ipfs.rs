@@ -8,16 +8,17 @@ pub(crate) async fn write_file(
     path: String,
     data: Vec<u8>,
 ) -> Result<(), Error> {
+    let opts = FilesWrite {
+        path: path.as_str(),
+        create: Some(true),
+        parents: Some(true),
+        cid_version: Some(1),
+        ..Default::default()
+    };
     ipfs.files_write_with_options(
-        FilesWrite {
-            path: path.as_str(),
-            create: Some(true),
-            parents: Some(true),
-            cid_version: Some(1),
-            ..Default::default()
-        },
+        opts.clone(),
         std::io::Cursor::new(data),
     )
-    .map_err(Error::ipfs)
+    .map_err(|e| Error::ipfs(format!("{} {:?}", e, opts)))
     .await
 }

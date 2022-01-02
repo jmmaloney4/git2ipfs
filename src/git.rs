@@ -59,11 +59,21 @@ pub(crate) fn generate_ref(reference: Reference) -> Result<String, Error> {
     }
 }
 
-use rand::distributions::{Alphanumeric, DistString};
-use rand::thread_rng;
+use rand::{
+    distributions::{Alphanumeric, DistString},
+    SeedableRng,
+};
 pub(crate) fn gen_temp_dir_path() -> String {
     const TMP_PATH_LEN: usize = 19;
-    Alphanumeric.sample_string(&mut thread_rng(), TMP_PATH_LEN)
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .try_into()
+            .unwrap_or(0),
+    );
+    Alphanumeric.sample_string(&mut rng, TMP_PATH_LEN)
 }
 
 pub(crate) fn prefix_for_object_type(ty: git2::ObjectType) -> Result<Vec<u8>, Error> {
