@@ -6,7 +6,7 @@ use crate::error::*;
 pub(crate) async fn write_file(
     ipfs: &impl IpfsApi,
     path: String,
-    data: Box<dyn std::io::Read>,
+    data: Box<dyn std::io::Read + Sync + Send>,
 ) -> Result<(), Error> {
     let opts = FilesWrite {
         path: path.as_str(),
@@ -16,11 +16,7 @@ pub(crate) async fn write_file(
         ..Default::default()
     };
 
-    tryhard::retry_fn(|| async {
-        ipfs.files_write_with_options(opts.clone(), std::io::Cursor::new(data.clone()))
-            .map_err(|e| Error::ipfs(format!("{} {:?}", e, opts)))
-            .await
-    })
-    .retries(10)
-    .await
+    ipfs.files_write_with_options(opts.clone(), data)
+        .map_err(|e| Error::ipfs(format!("{} {:?}", e, opts)))
+        .await
 }

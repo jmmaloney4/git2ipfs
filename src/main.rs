@@ -207,7 +207,7 @@ mod files {
 
     pub(crate) fn from_repo<'a>(
         repo: &'a git2::Repository,
-    ) -> Box<dyn Iterator<Item = Result<(String, Box<dyn Read + 'a>), Error>> + 'a> {
+    ) -> Box<dyn Iterator<Item = Result<(String, Box<dyn Read + Sync + Send>), Error>> + 'a> {
         let inner = || {
             let odb: git2::Odb<'a> = repo.odb().context(Git)?;
 
@@ -225,8 +225,8 @@ mod files {
     pub(crate) fn objects<'a>(
         oids: impl Iterator<Item = git2::Oid> + 'a,
         odb: git2::Odb<'a>,
-    ) -> Box<dyn Iterator<Item = Result<(String, Box<dyn Read + 'a>), Error>> + 'a> {
-        Box::new(oids.map(|oid| {
+    ) -> Box<dyn Iterator<Item = Result<(String, Box<dyn Read + Sync + Send>), Error>> + 'a> {
+        Box::new(oids.map(move |oid| {
             let (reader, len, kind) = odb.reader(oid).context(Git)?;
             let prefix = format!("{}\0", len);
 
@@ -236,37 +236,40 @@ mod files {
                 .chain(reader);
 
             // Compress object with zlib
-            let compressed = flate2::read::ZlibEncoder::new(encoded, flate2::Compression::best());
+            let mut compressed = Vec::new();
+            flate2::read::ZlibEncoder::new(encoded, flate2::Compression::best())
+                .read_to_end(&mut compressed)
+                .context(Io)?;
 
             let hash = oid.to_string();
             Ok((
                 format!("/objects/{}/{}", &hash[..2], &hash[2..]),
-                Box::new(compressed) as Box<dyn Read + 'a>,
+                Box::new(std::io::Cursor::new(compressed)) as Box<dyn Read + Sync + Send>,
             ))
         }))
     }
 
     pub(crate) fn info_refs<'a>(
         refs: git2::References<'a>,
-    ) -> Box<dyn Iterator<Item = Result<(String, Box<dyn Read + 'a>), Error>> + 'a> {
+    ) -> Box<dyn Iterator<Item = Result<(String, Box<dyn Read + Sync + Send>), Error>> + 'a> {
         Box::new(std::iter::once_with(|| {
             Ok((
                 "/info/refs".to_owned(),
                 Box::new(std::io::Cursor::new(
                     git::generate_info_refs(refs)?.into_bytes(),
-                )) as Box<dyn Read + 'a>,
+                )) as Box<dyn Read + Sync + Send>,
             ))
         }))
     }
 
     pub(crate) fn head<'a>(
         r: git2::Reference<'a>,
-    ) -> Box<dyn Iterator<Item = Result<(String, Box<dyn Read + 'a>), Error>> + 'a> {
+    ) -> Box<dyn Iterator<Item = Result<(String, Box<dyn Read + Sync + Send>), Error>> + 'a> {
         Box::new(std::iter::once_with(|| {
             Ok((
                 "/HEAD".to_owned(),
                 Box::new(std::io::Cursor::new(git::generate_ref(r)?.into_bytes()))
-                    as Box<dyn Read + 'a>,
+                    as Box<dyn Read + Sync + Send>,
             ))
         }))
     }
