@@ -1,4 +1,7 @@
 use snafu::Snafu;
+pub(crate) use snafu::{OptionExt, ResultExt};
+
+pub(crate) type Result<T> = core::result::Result<T, Error>;
 
 #[derive(Debug, Snafu)]
 pub(crate) enum RefError {
