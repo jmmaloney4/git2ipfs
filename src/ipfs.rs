@@ -6,7 +6,7 @@ use crate::error::*;
 pub(crate) async fn write_file(
     ipfs: &impl IpfsApi,
     path: String,
-    data: Vec<u8>,
+    data: Box<dyn std::io::Read>,
 ) -> Result<(), Error> {
     let opts = FilesWrite {
         path: path.as_str(),

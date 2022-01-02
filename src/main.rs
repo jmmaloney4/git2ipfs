@@ -189,13 +189,10 @@ async fn git2ipfs(
 
 mod files {
     use snafu::ResultExt;
-    use std::io::{Cursor, Read};
+    use std::io::Read;
 
     use crate::error::*;
     use crate::git;
-
-    type FileInfo = (String, Vec<u8>);
-    type FileInfoResult = Result<FileInfo, Error>;
 
     /// Return the object ids for all objects in the object database.
     pub(crate) fn all_oids(odb: &git2::Odb) -> Result<Vec<git2::Oid>, Error> {
@@ -210,7 +207,7 @@ mod files {
 
     pub(crate) fn from_repo<'a>(
         repo: &'a git2::Repository,
-    ) -> Box<dyn Iterator<Item = FileInfoResult> + 'a> {
+    ) -> Box<dyn Iterator<Item = Result<(String, Box<dyn Read + 'a>), Error>> + 'a> {
         let inner = || {
             let odb: git2::Odb<'a> = repo.odb().context(Git)?;
 
@@ -228,46 +225,49 @@ mod files {
     pub(crate) fn objects<'a>(
         oids: impl Iterator<Item = git2::Oid> + 'a,
         odb: git2::Odb<'a>,
-    ) -> Box<dyn Iterator<Item = FileInfoResult> + 'a> {
-        Box::new(oids.map(move |oid| {
-            let object = odb.read(oid).context(Git)?;
-            let prefix = format!("{}\0", object.len());
+    ) -> Box<dyn Iterator<Item = Result<(String, Box<dyn Read + 'a>), Error>> + 'a> {
+        Box::new(oids.map(|oid| {
+            let (reader, len, kind) = odb.reader(oid).context(Git)?;
+            let prefix = format!("{}\0", len);
 
             // Add appropriate header to git object
-            let encoded = git::prefix_for_object_type(object.kind())?
+            let encoded = git::prefix_for_object_type(kind)?
                 .chain(prefix.as_bytes())
-                .chain(object.data());
+                .chain(reader);
 
             // Compress object with zlib
-            let mut compressed = Vec::<u8>::new();
-            flate2::read::ZlibEncoder::new(encoded, flate2::Compression::best())
-                .read_to_end(&mut compressed)
-                .context(Io)?;
+            let compressed = flate2::read::ZlibEncoder::new(encoded, flate2::Compression::best());
 
             let hash = oid.to_string();
             Ok((
                 format!("/objects/{}/{}", &hash[..2], &hash[2..]),
-                compressed,
+                Box::new(compressed) as Box<dyn Read + 'a>,
             ))
         }))
     }
 
     pub(crate) fn info_refs<'a>(
         refs: git2::References<'a>,
-    ) -> Box<dyn Iterator<Item = FileInfoResult> + 'a> {
+    ) -> Box<dyn Iterator<Item = Result<(String, Box<dyn Read + 'a>), Error>> + 'a> {
         Box::new(std::iter::once_with(|| {
             Ok((
                 "/info/refs".to_owned(),
-                git::generate_info_refs(refs)?.into_bytes(),
+                Box::new(std::io::Cursor::new(
+                    git::generate_info_refs(refs)?.into_bytes(),
+                )) as Box<dyn Read + 'a>,
             ))
         }))
     }
 
     pub(crate) fn head<'a>(
         r: git2::Reference<'a>,
-    ) -> Box<dyn Iterator<Item = FileInfoResult> + 'a> {
+    ) -> Box<dyn Iterator<Item = Result<(String, Box<dyn Read + 'a>), Error>> + 'a> {
         Box::new(std::iter::once_with(|| {
-            Ok(("/HEAD".to_owned(), git::generate_ref(r)?.into_bytes()))
+            Ok((
+                "/HEAD".to_owned(),
+                Box::new(std::io::Cursor::new(git::generate_ref(r)?.into_bytes()))
+                    as Box<dyn Read + 'a>,
+            ))
         }))
     }
 }
