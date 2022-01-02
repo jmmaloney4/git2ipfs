@@ -157,7 +157,13 @@ async fn git2ipfs(
                 Err(e) => Err(e),
                 Ok((path, data)) => {
                     let path = format!("/{}/{}", prefix, path);
-                    ipfs::write_file(ipfs, path.clone(), data).await
+                    // tryhard::retry_fn(|| {
+                    //     ipfs::write_file(ipfs, path.clone(), std::io::Cursor::new(data.clone()))
+                    // })
+                    // .retries(10)
+                    // .exponential_backoff(std::time::Duration::from_millis(10))
+                    // .await
+                    ipfs::write_file(ipfs, path.clone(), std::io::Cursor::new(data)).await
                 }
             }
         })
@@ -207,7 +213,7 @@ mod files {
 
     pub(crate) fn from_repo<'a>(
         repo: &'a git2::Repository,
-    ) -> Box<dyn Iterator<Item = Result<(String, Box<dyn Read + Sync + Send>), Error>> + 'a> {
+    ) -> Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a> {
         let inner = || {
             let odb: git2::Odb<'a> = repo.odb().context(Git)?;
 
@@ -225,7 +231,7 @@ mod files {
     pub(crate) fn objects<'a>(
         oids: impl Iterator<Item = git2::Oid> + 'a,
         odb: git2::Odb<'a>,
-    ) -> Box<dyn Iterator<Item = Result<(String, Box<dyn Read + Sync + Send>), Error>> + 'a> {
+    ) -> Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a> {
         Box::new(oids.map(move |oid| {
             let (reader, len, kind) = odb.reader(oid).context(Git)?;
             let prefix = format!("{}\0", len);
@@ -244,33 +250,27 @@ mod files {
             let hash = oid.to_string();
             Ok((
                 format!("/objects/{}/{}", &hash[..2], &hash[2..]),
-                Box::new(std::io::Cursor::new(compressed)) as Box<dyn Read + Sync + Send>,
+                compressed,
             ))
         }))
     }
 
     pub(crate) fn info_refs<'a>(
         refs: git2::References<'a>,
-    ) -> Box<dyn Iterator<Item = Result<(String, Box<dyn Read + Sync + Send>), Error>> + 'a> {
+    ) -> Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a> {
         Box::new(std::iter::once_with(|| {
             Ok((
                 "/info/refs".to_owned(),
-                Box::new(std::io::Cursor::new(
-                    git::generate_info_refs(refs)?.into_bytes(),
-                )) as Box<dyn Read + Sync + Send>,
+                git::generate_info_refs(refs)?.into_bytes(),
             ))
         }))
     }
 
     pub(crate) fn head<'a>(
         r: git2::Reference<'a>,
-    ) -> Box<dyn Iterator<Item = Result<(String, Box<dyn Read + Sync + Send>), Error>> + 'a> {
+    ) -> Box<dyn Iterator<Item = Result<(String, Vec<u8>), Error>> + 'a> {
         Box::new(std::iter::once_with(|| {
-            Ok((
-                "/HEAD".to_owned(),
-                Box::new(std::io::Cursor::new(git::generate_ref(r)?.into_bytes()))
-                    as Box<dyn Read + Sync + Send>,
-            ))
+            Ok(("/HEAD".to_owned(), git::generate_ref(r)?.into_bytes()))
         }))
     }
 }

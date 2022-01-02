@@ -3,11 +3,10 @@ use ipfs_api::{request::FilesWrite, IpfsApi};
 
 use crate::error::*;
 
-pub(crate) async fn write_file(
-    ipfs: &impl IpfsApi,
-    path: String,
-    data: Box<dyn std::io::Read + Sync + Send>,
-) -> Result<(), Error> {
+pub(crate) async fn write_file<R>(ipfs: &impl IpfsApi, path: String, data: R) -> Result<(), Error>
+where
+    R: 'static + std::io::Read + Sync + Send,
+{
     let opts = FilesWrite {
         path: path.as_str(),
         create: Some(true),
